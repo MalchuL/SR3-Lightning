@@ -1,0 +1,94 @@
+#### general settings
+name: PANx4_DF2K
+use_tb_logger: True
+model: sr
+distortion: sr
+scale: &scale 4
+save_img: False
+gpu_ids: [0]
+
+#### datasets
+datasets:
+  train:
+    phase: train
+    name: DF2K
+    mode: LQGT
+    dataroot_GT: /media/malchul/Новый том/Deep_Learning/datasets/superresolution/DIV2K_cropped/DF2K_train/HRx4_sub360
+    dataroot_LQ: /media/malchul/Новый том/Deep_Learning/datasets/superresolution/DIV2K_cropped/DF2K_train/LRx4_sub120
+    data_type: img
+    scale: *scale
+
+    use_shuffle: true
+    n_workers: 6  # per GPU
+    batch_size: 32
+    GT_size: 256
+    use_flip: true
+    use_rot: true
+    color: RGB
+  val:
+    phase: val
+    name: DF2K
+    mode: LQGT
+    GT_size: 256
+    dataroot_GT: /media/malchul/Новый том/Deep_Learning/datasets/superresolution/DIV2K_cropped/DF2K_train/HRx4_sub360
+    dataroot_LQ: /media/malchul/Новый том/Deep_Learning/datasets/superresolution/DIV2K_cropped/DF2K_train/LRx4_sub120
+    data_type: img
+    scale: *scale
+    color: null
+
+#  val:
+#    name: Set5
+#    mode: LQGT
+#    dataroot_GT: ../datasets/Set5/HR
+#    dataroot_LQ: ../datasets/Set5/LR_bicubic/X4
+
+#### network structures
+network_G:
+  which_model_G: PAN
+  in_nc: 3
+  out_nc: 3
+  nf: 40
+  unf: 24
+  nb: 16
+  scale: 4
+  
+#### path
+checkpoint_path: null
+
+#### training settings: learning rate scheme, loss
+train:
+  scheduler_params:
+    scheduler: CosineAnnealingLR_Restart
+    T_period: [250000, 250000, 250000, 250000]
+    eta_min: !!float 1e-7
+    restarts: [250000, 500000, 750000]
+    weights: [1, 1, 1]
+
+  optimizer_params:
+    optimizer: Adam
+    lr: !!float 7e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  niter: 1000000
+  warmup_iter: -1  # no warm up
+
+
+  pixel_criterion: l1
+  pixel_weight: 1.0
+
+  manual_seed: 10
+  log_freq: 100
+  val_freq: !!float 5e3
+
+  precision: 32
+  gradient_clip_val: 0
+
+
+  img_log_freq: 800
+
+
+#### logger
+logger:
+  print_freq: 100
+  save_checkpoint_freq: !!float 5e3

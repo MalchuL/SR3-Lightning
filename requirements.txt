@@ -1,0 +1,13 @@
+albumentations==0.4.5
+dlib==19.21.1
+hydra-core==1.0.3
+jupyter==1.0.0
+matplotlib==3.2.1
+numpy==1.19.5
+opencv-python==4.2.0.34
+pytorch-lightning==1.2.2
+scikit-image==0.17.2
+torch==1.7.0
+torchvision
+tqdm==4.46.1
+lmdb
