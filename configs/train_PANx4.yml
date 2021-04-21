@@ -19,7 +19,7 @@ datasets:
     scale: *scale
 
     use_shuffle: true
-    n_workers: 6  # per GPU
+    n_workers: 4  # per GPU
     batch_size: 32
     GT_size: 256
     use_flip: true
@@ -44,13 +44,10 @@ datasets:
 
 #### network structures
 network_G:
-  which_model_G: PAN
+  model: UNetUpsampler
   in_nc: 3
   out_nc: 3
-  nf: 40
-  unf: 24
-  nb: 16
-  scale: 4
+  scale: *scale
   
 #### path
 checkpoint_path: null
@@ -74,12 +71,14 @@ train:
   warmup_iter: -1  # no warm up
 
 
-  pixel_criterion: l1
+  pixel_criterion: l2
   pixel_weight: 1.0
 
   manual_seed: 10
   log_freq: 100
-  val_freq: !!float 5e3
+  val_freq: 1
+  val_steps_limit: 400
+
 
   precision: 32
   gradient_clip_val: 0
@@ -87,6 +86,10 @@ train:
 
   img_log_freq: 800
 
+
+sigma_begin: 1
+sigma_end: 0.7 #0.03 in full prod
+num_sigmas: 20
 
 #### logger
 logger:

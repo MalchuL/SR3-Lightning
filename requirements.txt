@@ -11,3 +11,4 @@ torch==1.7.0
 torchvision
 tqdm==4.46.1
 lmdb
+segmentation-models-pytorch

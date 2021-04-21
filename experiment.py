@@ -1,7 +1,9 @@
 import itertools
+import math
 from argparse import Namespace
 from pathlib import Path
 
+import numpy as np
 import pytorch_lightning as pl
 import torchvision
 from torch import optim, autograd
@@ -17,6 +19,7 @@ from models.loss import CharbonnierLoss
 from registry import registries
 from transforms.transform import get_transform, get_cartoon_transform
 import torch
+import torch.nn.functional as F
 
 class SR3Experiment(pl.LightningModule):
 
@@ -30,7 +33,18 @@ class SR3Experiment(pl.LightningModule):
 
 
         self.create_model()
+        self.scale = self.hparams.scale
 
+        self.sigma_begin = self.hparams.sigma_begin
+        self.sigma_end = self.hparams.sigma_end
+        self.num_sigmas = self.hparams.num_sigmas
+
+        self.sigmas = np.exp(
+            np.linspace(np.log(self.sigma_begin),
+                        np.log(self.sigma_end),
+                        self.num_sigmas, dtype=np.float32))
+
+        print('sigmas', self.sigmas)
         # loss
         loss_type = self.hparams.train.pixel_criterion
         self.loss_type = loss_type
@@ -64,8 +78,8 @@ class SR3Experiment(pl.LightningModule):
         self.netG = networks.define_G(opt.network_G)
 
 
-    def forward(self, input):
-        return self.netG(input)
+    def forward(self, input, yt, sigmas):
+        return self.netG(input, yt, sigmas)
 
 
 
@@ -74,10 +88,10 @@ class SR3Experiment(pl.LightningModule):
         out = outputs['out']
         if len(out) > 0 and self.global_step % self.hparams.train.img_log_freq == 0:
             print('log image')
-            out_image = torch.cat([out[name].clone() for name in ['real', 'fake']], dim=0)
+            out_image = torch.cat([out[name].clone() for name in ['real', 'fake', 'noisy']], dim=0)
             grid = torchvision.utils.make_grid(out_image, nrow=len(out['real']))
 
-            #grid = grid * 0.5 + 0.5
+            grid = grid * 0.5 + 0.5
             grid = torch.clamp(grid, 0.0, 1.0)
             self.logger.experiment.add_image('train_image', grid, self.global_step)
 
@@ -85,34 +99,63 @@ class SR3Experiment(pl.LightningModule):
         return outputs
 
 
+    def get_prior_image(self, tensor):
+        N, C, H, W = tensor.shape
+        prior = torch.randn([N, C, H * self.scale, W * self.scale]).type_as(tensor)
+        return prior
+
+    def add_noise(self, input, sigma):
+        noise = torch.randn_like(input)
+
+        output = torch.sqrt(sigma) * input + torch.sqrt(1 - sigma) * noise
+        return output.type_as(input), noise.type_as(input)
+
+    def get_sigmas(self, sigmas, batch_size, is_prod=True):
+        if is_prod:
+            labels = np.ones([batch_size, len(sigmas)])
+            teta = np.random.randint(0, len(sigmas), batch_size)
+            for i in range(batch_size):
+                labels[i,:teta[i]] = sigmas[:teta[i]]
+            labels = np.prod(labels, 1)
+        else:
+            labels = np.random.choice(sigmas, batch_size)
+        return labels.reshape([-1, 1, 1, 1])
+
     def training_step(self, batch, batch_idx):
 
-        self.var_L = batch['LQ'] # LQ
-        self.real_H = batch['GT'] # GT
 
-        self.fake_H = self.netG(self.var_L)
+
+        input = batch['LQ'] # LQ
+        target = batch['GT'] # GT
+
+
+        sigmas = torch.from_numpy(self.get_sigmas(self.sigmas, input.shape[0])).to(input.device)
+        noisy_input, noise = self.add_noise(target, sigmas)
+
+        self.fake_H = self(input, noisy_input, sigmas)
         if self.loss_type == 'fs':
-            l_pix = self.l_pix_w * self.cri_pix(self.fake_H, self.real_H) + self.l_fs_w * self.cri_fs(self.fake_H,
-                                                                                                      self.real_H)
+            l_pix = self.l_pix_w * self.cri_pix(self.fake_H, target) + self.l_fs_w * self.cri_fs(self.fake_H,
+                                                                                                      target)
         elif self.loss_type == 'grad':
-            l1 = self.l_pix_w * self.cri_pix(self.fake_H, self.real_H)
-            lg = self.l_grad_w * self.gradloss(self.fake_H, self.real_H)
+            l1 = self.l_pix_w * self.cri_pix(self.fake_H, target)
+            lg = self.l_grad_w * self.gradloss(self.fake_H, target)
             l_pix = l1 + lg
         elif self.loss_type == 'grad_fs':
-            l1 = self.l_pix_w * self.cri_pix(self.fake_H, self.real_H)
-            lg = self.l_grad_w * self.gradloss(self.fake_H, self.real_H)
-            lfs = self.l_fs_w * self.cri_fs(self.fake_H, self.real_H)
+            l1 = self.l_pix_w * self.cri_pix(self.fake_H, target)
+            lg = self.l_grad_w * self.gradloss(self.fake_H, target)
+            lfs = self.l_fs_w * self.cri_fs(self.fake_H, target)
             l_pix = l1 + lg + lfs
         else:
-            l_pix = self.l_pix_w * self.cri_pix(self.fake_H, self.real_H)
+            l_pix = self.l_pix_w * self.cri_pix(self.fake_H, noise)
 
 
 
         loss = l_pix
-        log = {'loss_D': loss}
-        out = {'real': self.real_H,
-               'fake': self.fake_H,
-               'LQ': self.var_L,
+        log = {'loss': loss}
+        out = {'real': target,
+               'fake': noisy_input - self.fake_H,
+               'noisy': noisy_input,
+               'LQ': input,
                }
         return {'loss': loss, 'out': out, 'log': log, 'progress_bar': log}
 
@@ -121,10 +164,23 @@ class SR3Experiment(pl.LightningModule):
     def validation_step(self, batch, batch_nb):
 
         real = batch['LQ']
-        fake = self(real)
+        yt = self.get_prior_image(real)
+        teta_t = self.sigmas[0]
+        for i in range(self.num_sigmas):
 
-        grid = torchvision.utils.make_grid(torch.cat([batch['GT'], fake], dim=0))
+            alpha_t = self.sigmas[i]
+            teta_t *= alpha_t
+
+            multiplier = ((1 - alpha_t) / (np.sqrt(1 - teta_t)))
+
+            yt = (1 / np.sqrt(alpha_t)) * (yt - multiplier * self(real, yt, teta_t))
+            if i < self.num_sigmas - 1:
+                z = self.get_prior_image(real)
+                yt += np.sqrt(1 - alpha_t) * z
+
+        grid = torchvision.utils.make_grid(torch.cat([batch['GT'], yt], dim=0))
         grid = grid * 0.5 + 0.5
+        grid = torch.clamp(grid, 0, 1)
 
         torchvision.utils.save_image(grid, str(self.val_folder / (str(batch_nb) + '.png')), nrow=1)
 

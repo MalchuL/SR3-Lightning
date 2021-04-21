@@ -127,6 +127,9 @@ class LQGTDataset(data.Dataset):
 
         if LQ_path is None:
             LQ_path = GT_path
+
+        img_LQ = img_LQ * 2 - 1
+        img_GT = img_GT * 2 - 1
         return {'LQ': img_LQ, 'GT': img_GT, 'LQ_path': LQ_path, 'GT_path': GT_path}
 
     def __len__(self):
