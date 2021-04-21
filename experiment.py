@@ -49,11 +49,22 @@ class SR3Experiment(pl.LightningModule):
         loss_type = self.hparams.train.pixel_criterion
         self.loss_type = loss_type
         if loss_type == 'l1':
-            self.cri_pix = nn.L1Loss()
+            self.cri_pix = nn.L1Loss(reduction='none')
         elif loss_type == 'l2':
-            self.cri_pix = nn.MSELoss()
+            self.cri_pix = nn.MSELoss(reduction='none')
         elif loss_type == 'cb':
             self.cri_pix = CharbonnierLoss()
+        elif loss_type == 'l1l2':
+            class L1L2Loss(nn.Module):
+                def __init__(self, reduction='mean'):
+                    super().__init__()
+                    self.l1 = nn.L1Loss(reduction=reduction)
+                    self.l2 = nn.MSELoss(reduction=reduction)
+
+                def forward(self, x, y):
+                    return (self.l1(x, y) + self.l2(x, y)) * 0.5
+
+            self.cri_pix = L1L2Loss(reduction='none')
         else:
             raise NotImplementedError('Loss type [{:s}] is not recognized.'.format(loss_type))
         self.l_pix_w = self.hparams.train.pixel_weight
@@ -88,8 +99,9 @@ class SR3Experiment(pl.LightningModule):
         out = outputs['out']
         if len(out) > 0 and self.global_step % self.hparams.train.img_log_freq == 0:
             print('log image')
-            out_image = torch.cat([out[name].clone() for name in ['real', 'fake', 'noisy']], dim=0)
-            grid = torchvision.utils.make_grid(out_image, nrow=len(out['real']))
+            elems = min(out['real'].shape[0], self.hparams.train.img_to_log)
+            out_image = torch.cat([out[name].clone()[:elems] for name in ['real', 'fake', 'noisy']], dim=0)
+            grid = torchvision.utils.make_grid(out_image, nrow=elems)
 
             grid = grid * 0.5 + 0.5
             grid = torch.clamp(grid, 0.0, 1.0)
@@ -108,7 +120,10 @@ class SR3Experiment(pl.LightningModule):
         noise = torch.randn_like(input)
 
         output = torch.sqrt(sigma) * input + torch.sqrt(1 - sigma) * noise
-        return output.type_as(input), noise.type_as(input)
+        return output, noise
+
+    def invert_noise(self, output, noise, sigma): # look on add_noise func
+       return (output - torch.sqrt(1 - sigma) * noise) / torch.sqrt(sigma)
 
     def get_sigmas(self, sigmas, batch_size, is_prod=True):
         if is_prod:
@@ -129,7 +144,7 @@ class SR3Experiment(pl.LightningModule):
         target = batch['GT'] # GT
 
 
-        sigmas = torch.from_numpy(self.get_sigmas(self.sigmas, input.shape[0])).to(input.device)
+        sigmas = torch.from_numpy(self.get_sigmas(self.sigmas, input.shape[0])).type_as(input)
         noisy_input, noise = self.add_noise(target, sigmas)
 
         self.fake_H = self(input, noisy_input, sigmas)
@@ -147,13 +162,15 @@ class SR3Experiment(pl.LightningModule):
             l_pix = l1 + lg + lfs
         else:
             l_pix = self.l_pix_w * self.cri_pix(self.fake_H, noise)
+            l_pix = (l_pix / sigmas).mean()
+
 
 
 
         loss = l_pix
         log = {'loss': loss}
         out = {'real': target,
-               'fake': noisy_input - self.fake_H,
+               'fake': self.invert_noise(noisy_input, self.fake_H, sigmas),
                'noisy': noisy_input,
                'LQ': input,
                }
@@ -166,23 +183,52 @@ class SR3Experiment(pl.LightningModule):
         real = batch['LQ']
         yt = self.get_prior_image(real)
         teta_t = self.sigmas[0]
+        eps = 1e-4
+
+
+        log_yt = []
+
+        SHAPE_GF_INFER = False
+
         for i in range(self.num_sigmas):
 
-            alpha_t = self.sigmas[i]
+            alpha_t = self.sigmas[-1-i]
             teta_t *= alpha_t
 
-            multiplier = ((1 - alpha_t) / (np.sqrt(1 - teta_t)))
 
-            yt = (1 / np.sqrt(alpha_t)) * (yt - multiplier * self(real, yt, teta_t))
-            if i < self.num_sigmas - 1:
-                z = self.get_prior_image(real)
-                yt += np.sqrt(1 - alpha_t) * z
+            if SHAPE_GF_INFER:
+                step = math.sqrt(2)
+                if i < self.num_sigmas - 1:
+                    yt = yt - self(real, yt, teta_t)
+                    z = self.get_prior_image(real)
+                    yt += step * teta_t * z
+                else:
+                    yt = yt - self(real, yt, teta_t)
+            else:
+                multiplier = ((1 - alpha_t) / (np.sqrt(1 - teta_t + eps)))
+                yt = (1 / np.sqrt(alpha_t)) * (yt - multiplier * self(real, yt, teta_t))
+                if i < self.num_sigmas - 1:
+                    z = self.get_prior_image(real)
+                    yt += np.sqrt(1 - alpha_t) * z
+
+            log_yt.append(yt)
+
+        self.log('val_min', yt.min())
+        self.log('val_max', yt.max())
 
         grid = torchvision.utils.make_grid(torch.cat([batch['GT'], yt], dim=0))
         grid = grid * 0.5 + 0.5
         grid = torch.clamp(grid, 0, 1)
 
         torchvision.utils.save_image(grid, str(self.val_folder / (str(batch_nb) + '.png')), nrow=1)
+
+        if batch_nb == 0:
+            log_yt = log_yt[:min(len(log_yt), self.hparams.train.img_to_log)]
+            grid_tensor = torch.cat([batch['GT'], *log_yt], dim=0)
+            grid = torchvision.utils.make_grid(grid_tensor, nrow=len(grid_tensor))
+            grid = grid * 0.5 + 0.5
+            grid = torch.clamp(grid, 0, 1)
+            self.logger.experiment.add_image('valid_image', grid, self.current_epoch)
 
         return {}
 

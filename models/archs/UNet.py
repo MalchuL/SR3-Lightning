@@ -17,7 +17,7 @@ class UNetUpsampler(nn.Module):
     def forward(self, x, yt, sigma):
 
         x_upsampled = self.upsample(x)
-        sigma = (torch.ones([x_upsampled.shape[0], 1, x_upsampled.shape[2], x_upsampled.shape[3]]).type_as(x) * sigma).type_as(x)
+        sigma = torch.ones([x_upsampled.shape[0], 1, x_upsampled.shape[2], x_upsampled.shape[3]]).type_as(x) * sigma
         input = torch.cat([x_upsampled, yt, sigma], dim=1)
 
         N, C, H, W = input.shape

@@ -19,7 +19,7 @@ datasets:
     scale: *scale
 
     use_shuffle: true
-    n_workers: 4  # per GPU
+    n_workers: 6  # per GPU
     batch_size: 32
     GT_size: 256
     use_flip: true
@@ -63,7 +63,7 @@ train:
 
   optimizer_params:
     optimizer: Adam
-    lr: !!float 7e-4
+    lr: !!float 1e-3
     weight_decay: 0
     betas: [0.9, 0.99]
 
@@ -71,7 +71,7 @@ train:
   warmup_iter: -1  # no warm up
 
 
-  pixel_criterion: l2
+  pixel_criterion: l1l2
   pixel_weight: 1.0
 
   manual_seed: 10
@@ -85,13 +85,9 @@ train:
 
 
   img_log_freq: 800
+  img_to_log: 10
 
 
-sigma_begin: 1
-sigma_end: 0.7 #0.03 in full prod
-num_sigmas: 20
-
-#### logger
-logger:
-  print_freq: 100
-  save_checkpoint_freq: !!float 5e3
+sigma_begin: 0.999
+sigma_end: 0.79 #0.03 in full prod
+num_sigmas: 30
