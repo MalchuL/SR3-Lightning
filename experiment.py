@@ -125,12 +125,12 @@ class SR3Experiment(pl.LightningModule):
     def invert_noise(self, output, noise, sigma): # look on add_noise func
        return (output - torch.sqrt(1 - sigma) * noise) / torch.sqrt(sigma)
 
-    def get_sigmas(self, sigmas, batch_size, is_prod=True):
+    def get_theta(self, sigmas, batch_size, is_prod=True):
         if is_prod:
             labels = np.ones([batch_size, len(sigmas)])
-            teta = np.random.randint(0, len(sigmas), batch_size)
+            theta = np.random.randint(0, len(sigmas), batch_size)
             for i in range(batch_size):
-                labels[i,:teta[i]] = sigmas[:teta[i]]
+                labels[i,:theta[i]] = sigmas[:theta[i]]
             labels = np.prod(labels, 1)
         else:
             labels = np.random.choice(sigmas, batch_size)
@@ -144,10 +144,10 @@ class SR3Experiment(pl.LightningModule):
         target = batch['GT'] # GT
 
 
-        sigmas = torch.from_numpy(self.get_sigmas(self.sigmas, input.shape[0])).type_as(input)
-        noisy_input, noise = self.add_noise(target, sigmas)
+        theta = torch.from_numpy(self.get_theta(self.sigmas, input.shape[0])).type_as(input)
+        noisy_input, noise = self.add_noise(target, theta)
 
-        self.fake_H = self(input, noisy_input, sigmas)
+        self.fake_H = self(input, noisy_input, theta)
         if self.loss_type == 'fs':
             l_pix = self.l_pix_w * self.cri_pix(self.fake_H, target) + self.l_fs_w * self.cri_fs(self.fake_H,
                                                                                                       target)
@@ -162,7 +162,7 @@ class SR3Experiment(pl.LightningModule):
             l_pix = l1 + lg + lfs
         else:
             l_pix = self.l_pix_w * self.cri_pix(self.fake_H, noise)
-            l_pix = (l_pix / sigmas).mean()
+            l_pix = (l_pix / theta).mean()
 
 
 
@@ -170,7 +170,7 @@ class SR3Experiment(pl.LightningModule):
         loss = l_pix
         log = {'loss': loss}
         out = {'real': target,
-               'fake': self.invert_noise(noisy_input, self.fake_H, sigmas),
+               'fake': self.invert_noise(noisy_input, self.fake_H, theta),
                'noisy': noisy_input,
                'LQ': input,
                }
@@ -192,20 +192,20 @@ class SR3Experiment(pl.LightningModule):
         for i in range(self.num_sigmas):
 
             alpha_t = self.sigmas[-1-i]
-            teta_t = np.prod(self.sigmas[:len(self.sigmas) - i])  # inverse sigmas
+            theta_t = np.prod(self.sigmas[:len(self.sigmas) - i])  # inverse sigmas
 
 
             if SHAPE_GF_INFER:
                 step = math.sqrt(2)
                 if i < self.num_sigmas - 1:
-                    yt = yt - self(real, yt, teta_t)
+                    yt = yt - self(real, yt, theta_t)
                     z = self.get_prior_image(real)
-                    yt += step * teta_t * z
+                    yt += step * theta_t * z
                 else:
-                    yt = yt - self(real, yt, teta_t)
+                    yt = yt - self(real, yt, theta_t)
             else:
-                multiplier = ((1 - alpha_t) / (np.sqrt(1 - teta_t + eps)))
-                yt = (1 / np.sqrt(alpha_t)) * (yt - multiplier * self(real, yt, teta_t))
+                multiplier = ((1 - alpha_t) / (np.sqrt(1 - theta_t + eps)))
+                yt = (1 / np.sqrt(alpha_t)) * (yt - multiplier * self(real, yt, theta_t))
                 if i < self.num_sigmas - 1:
                     z = self.get_prior_image(real)
                     yt += np.sqrt(1 - alpha_t) * z
