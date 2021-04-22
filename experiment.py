@@ -161,8 +161,9 @@ class SR3Experiment(pl.LightningModule):
             lfs = self.l_fs_w * self.cri_fs(self.fake_H, target)
             l_pix = l1 + lg + lfs
         else:
+            eps = self.hparams.train.eps
             l_pix = self.l_pix_w * self.cri_pix(self.fake_H, noise)
-            l_pix = (l_pix / theta).mean()
+            l_pix = (l_pix / (torch.clamp(torch.sqrt(1 - theta), min=eps))).mean()
 
 
 
@@ -181,18 +182,18 @@ class SR3Experiment(pl.LightningModule):
     def validation_step(self, batch, batch_nb):
 
         real = batch['LQ']
-        yt = self.get_prior_image(real)
-        eps = 1e-4
+        yt = self.get_prior_image(real) + F.interpolate(real, scale_factor=self.scale, mode='bilinear')
+        eps = 1e-9
 
 
         log_yt = []
 
         SHAPE_GF_INFER = False
 
-        for i in range(self.num_sigmas):
+        for i in reversed(tuple(range(self.num_sigmas))):
 
-            alpha_t = self.sigmas[-1-i]
-            theta_t = np.prod(self.sigmas[:len(self.sigmas) - i])  # inverse sigmas
+            alpha_t = self.sigmas[i]
+            theta_t = np.prod(self.sigmas[:i + 1])  # inverse sigmas
 
 
             if SHAPE_GF_INFER:
@@ -204,7 +205,7 @@ class SR3Experiment(pl.LightningModule):
                 else:
                     yt = yt - self(real, yt, theta_t)
             else:
-                multiplier = ((1 - alpha_t) / (np.sqrt(1 - theta_t + eps)))
+                multiplier = ((1 - alpha_t) / (np.sqrt(1 - theta_t) + eps))
                 yt = (1 / np.sqrt(alpha_t)) * (yt - multiplier * self(real, yt, theta_t))
                 if i < self.num_sigmas - 1:
                     z = self.get_prior_image(real)
@@ -222,9 +223,9 @@ class SR3Experiment(pl.LightningModule):
         torchvision.utils.save_image(grid, str(self.val_folder / (str(batch_nb) + '.png')), nrow=1)
 
         if batch_nb == 0:
-            log_yt = log_yt[:min(len(log_yt), self.hparams.train.img_to_log)]
+            log_yt = log_yt[:min(len(log_yt), self.hparams.train.valid_image_to_log)]
             grid_tensor = torch.cat([batch['GT'], *log_yt], dim=0)
-            grid = torchvision.utils.make_grid(grid_tensor, nrow=len(grid_tensor))
+            grid = torchvision.utils.make_grid(grid_tensor, nrow=round(math.sqrt(len(grid_tensor))))
             grid = grid * 0.5 + 0.5
             grid = torch.clamp(grid, 0, 1)
             self.logger.experiment.add_image('valid_image', grid, self.current_epoch)
