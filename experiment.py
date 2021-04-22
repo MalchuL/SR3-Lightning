@@ -182,7 +182,6 @@ class SR3Experiment(pl.LightningModule):
 
         real = batch['LQ']
         yt = self.get_prior_image(real)
-        teta_t = self.sigmas[0]
         eps = 1e-4
 
 
@@ -193,7 +192,7 @@ class SR3Experiment(pl.LightningModule):
         for i in range(self.num_sigmas):
 
             alpha_t = self.sigmas[-1-i]
-            teta_t *= alpha_t
+            teta_t = np.prod(self.sigmas[:len(self.sigmas) - i])  # inverse sigmas
 
 
             if SHAPE_GF_INFER:
