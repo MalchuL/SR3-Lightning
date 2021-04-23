@@ -35,16 +35,7 @@ class SR3Experiment(pl.LightningModule):
         self.create_model()
         self.scale = self.hparams.scale
 
-        self.sigma_begin = self.hparams.sigma_begin
-        self.sigma_end = self.hparams.sigma_end
-        self.num_sigmas = self.hparams.num_sigmas
 
-        self.sigmas = np.exp(
-            np.linspace(np.log(self.sigma_begin),
-                        np.log(self.sigma_end),
-                        self.num_sigmas, dtype=np.float32))
-
-        print('sigmas', self.sigmas)
         # loss
         loss_type = self.hparams.train.pixel_criterion
         self.loss_type = loss_type
@@ -62,7 +53,7 @@ class SR3Experiment(pl.LightningModule):
                     self.l2 = nn.MSELoss(reduction=reduction)
 
                 def forward(self, x, y):
-                    return (self.l1(x, y) + self.l2(x, y)) * 0.5
+                    return self.l1(x, y) + self.l2(x, y)
 
             self.cri_pix = L1L2Loss(reduction='none')
         else:
@@ -89,8 +80,58 @@ class SR3Experiment(pl.LightningModule):
         self.netG = networks.define_G(opt.network_G)
 
 
-    def forward(self, input, yt, sigmas):
-        return self.netG(input, yt, sigmas)
+    def forward(self, input, yt, theta):
+        return self.netG(input, yt, theta)
+
+    def set_new_noise_schedule(
+            self,
+            init=torch.linspace,
+            init_kwargs={'steps': 50, 'start': 1e-6, 'end': 1e-2}
+    ):
+        """
+        Sets sampling noise schedule. Authors in the paper showed
+        that WaveGrad supports variable noise schedules during inference.
+        Thanks to the continuous noise level conditioning.
+        :param init (callable function, optional): function which initializes betas
+        :param init_kwargs (dict, optional): dict of arguments to be pushed to `init` function.
+            Should always contain the key `steps` corresponding to the number of iterations to be done by the model.
+            This is done so because `torch.linspace` has this argument named as `steps`.
+        """
+        assert 'steps' in list(init_kwargs.keys()), \
+            '`init_kwargs` should always contain the key `steps` corresponding to the number of iterations to be done by the model.'
+        n_iter = init_kwargs['steps']
+
+        betas = init(**init_kwargs)
+        alphas = 1 - betas
+        alphas_cumprod = alphas.cumprod(dim=0)
+        alphas_cumprod_prev = torch.cat([torch.FloatTensor([1]), alphas_cumprod[:-1]])
+
+        self.register_buffer('betas', betas)
+        self.register_buffer('alphas', alphas)
+        self.register_buffer('alphas_cumprod', alphas_cumprod)
+        self.register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
+
+        alphas_cumprod_prev_with_last = torch.cat([torch.FloatTensor([1]), alphas_cumprod])
+        self.sqrt_alphas_cumprod_prev = alphas_cumprod_prev_with_last.sqrt().numpy()
+
+        self.num_alphas = n_iter
+        self.noise_schedule_kwargs = {'init': init, 'init_kwargs': init_kwargs}
+        self.noise_schedule_is_set = True
+
+    def sample_continuous_noise_level(self, batch_size):
+        """
+        Samples continuous noise level sqrt(alpha_cumprod).
+        This is what makes WaveGrad different from other Denoising Diffusion Probabilistic Models.
+        """
+        s = np.random.choice(range(1, self.num_alphas + 1), size=batch_size)
+        continuous_alpha_cumprod = torch.FloatTensor(
+            np.random.uniform(
+                self.sqrt_alphas_cumprod_prev[s - 1],
+                self.sqrt_alphas_cumprod_prev[s],
+                size=batch_size
+            ) ** 2
+        )
+        return continuous_alpha_cumprod.view(-1, 1, 1, 1)
 
 
 
@@ -116,35 +157,24 @@ class SR3Experiment(pl.LightningModule):
         prior = torch.randn([N, C, H * self.scale, W * self.scale]).type_as(tensor)
         return prior
 
-    def add_noise(self, input, sigma):
+    def add_noise(self, input, theta):
         noise = torch.randn_like(input)
-
-        output = torch.sqrt(sigma) * input + torch.sqrt(1 - sigma) * noise
+        output = torch.sqrt(theta) * input + torch.sqrt(1 - theta) * noise
         return output, noise
 
-    def invert_noise(self, output, noise, sigma): # look on add_noise func
-       return (output - torch.sqrt(1 - sigma) * noise) / torch.sqrt(sigma)
+    def invert_noise(self, output, noise, theta): # look on add_noise func
+       return (output - torch.sqrt(1 - theta) * noise) / torch.sqrt(theta)
 
-    def get_theta(self, sigmas, batch_size, is_prod=True):
-        if is_prod:
-            labels = np.ones([batch_size, len(sigmas)])
-            theta = np.random.randint(0, len(sigmas), batch_size)
-            for i in range(batch_size):
-                labels[i,:theta[i]] = sigmas[:theta[i]]
-            labels = np.prod(labels, 1)
-        else:
-            labels = np.random.choice(sigmas, batch_size)
-        return labels.reshape([-1, 1, 1, 1])
+    def get_theta(self, batch_size):
+        return self.sample_continuous_noise_level(batch_size)
+
 
     def training_step(self, batch, batch_idx):
-
-
 
         input = batch['LQ'] # LQ
         target = batch['GT'] # GT
 
-
-        theta = torch.from_numpy(self.get_theta(self.sigmas, input.shape[0])).type_as(input)
+        theta = self.get_theta(input.shape[0]).type_as(input)
         noisy_input, noise = self.add_noise(target, theta)
 
         self.fake_H = self(input, noisy_input, theta)
@@ -161,9 +191,8 @@ class SR3Experiment(pl.LightningModule):
             lfs = self.l_fs_w * self.cri_fs(self.fake_H, target)
             l_pix = l1 + lg + lfs
         else:
-            eps = self.hparams.train.eps
-            l_pix = self.l_pix_w * self.cri_pix(self.fake_H, noise)
-            l_pix = (l_pix / (torch.clamp(torch.sqrt(1 - theta), min=eps))).mean()
+            l_pix = self.l_pix_w * self.cri_pix(self.fake_H, noise).mean()
+
 
 
 
@@ -177,28 +206,36 @@ class SR3Experiment(pl.LightningModule):
                }
         return {'loss': loss, 'out': out, 'log': log, 'progress_bar': log}
 
+    def on_train_epoch_start(self) -> None:
+        self.set_new_noise_schedule(
+            init_kwargs={'steps': self.hparams.train.num_betas, 'start': self.hparams.train.beta_begin,
+                         'end': self.hparams.train.beta_end})
 
+    def on_validation_epoch_start(self) -> None:
+        self.set_new_noise_schedule(
+            init_kwargs={'steps': self.hparams.num_betas, 'start': self.hparams.beta_begin,
+                         'end': self.hparams.beta_end})
 
     def validation_step(self, batch, batch_nb):
 
         real = batch['LQ']
         yt = self.get_prior_image(real) + F.interpolate(real, scale_factor=self.scale, mode='bilinear')
-        eps = 1e-9
+        eps = self.hparams.train.eps
 
 
         log_yt = []
 
         SHAPE_GF_INFER = False
 
-        for i in reversed(tuple(range(self.num_sigmas))):
+        for i in reversed(tuple(range(self.num_alphas))):
 
-            alpha_t = self.sigmas[i]
-            theta_t = np.prod(self.sigmas[:i + 1])  # inverse sigmas
+            alpha_t = self.alphas[i]
+            theta_t = self.alphas_cumprod[i]
 
 
             if SHAPE_GF_INFER:
                 step = math.sqrt(2)
-                if i < self.num_sigmas - 1:
+                if i < self.num_alphas - 1:
                     yt = yt - self(real, yt, theta_t)
                     z = self.get_prior_image(real)
                     yt += step * theta_t * z
@@ -207,7 +244,7 @@ class SR3Experiment(pl.LightningModule):
             else:
                 multiplier = ((1 - alpha_t) / (np.sqrt(1 - theta_t) + eps))
                 yt = (1 / np.sqrt(alpha_t)) * (yt - multiplier * self(real, yt, theta_t))
-                if i < self.num_sigmas - 1:
+                if i < self.num_alphas - 1:
                     z = self.get_prior_image(real)
                     yt += np.sqrt(1 - alpha_t) * z
 

@@ -19,7 +19,7 @@ datasets:
     scale: *scale
 
     use_shuffle: true
-    n_workers: 4  # per GPU
+    n_workers: 5  # per GPU
     batch_size: 32
     GT_size: 256
     use_flip: true
@@ -88,8 +88,12 @@ train:
   img_to_log: 10
   valid_image_to_log: 30
 
-  eps: 0.02
+  eps: 0.0000001
 
-sigma_begin: 0.9999
-sigma_end: 0.79 #0.03 in full prod
-num_sigmas: 30
+  beta_begin: 0.000001
+  beta_end: 0.01
+  num_betas: 1000
+
+beta_begin: 0.000001
+beta_end: 0.01
+num_betas: 50
