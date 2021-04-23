@@ -1,3 +1,5 @@
+## TODO Super Resolution  repo, based on PAN repo and [SR3 paper](https://arxiv.org/pdf/2104.07636v1.pdf)
+
 ## If you have questions about results, please check the new update version of file PAN_arch.py.
 # PAN [:zap: 272K parameters]
 ### Lowest parameters in AIM2020 Efficient Super Resolution.
